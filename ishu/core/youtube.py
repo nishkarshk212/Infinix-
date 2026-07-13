@@ -17,6 +17,7 @@ import glob
 import os
 import random
 import re
+import time
 import time as _time
 from typing import Union
 
@@ -487,13 +488,25 @@ async def _ytdlp_nocookie_download(link: str, media_type: str) -> str | None:
             return None
 
 
+# Cooldowns to temporarily skip failing downloaders (5 minutes cooldown)
+_DOWNLOADER_COOLDOWNS = {}
+
+def _mark_downloader_failed(name: str):
+    _DOWNLOADER_COOLDOWNS[name] = time.time() + 300
+    logger.warning("Downloader %s marked as failing. Cooldown active for 5 mins.", name)
+
+def _is_downloader_available(name: str) -> bool:
+    cooldown = _DOWNLOADER_COOLDOWNS.get(name, 0)
+    return time.time() >= cooldown
+
+
 # ── Main download entrypoint ──────────────────────────────────────────────────
 async def _download_with_fallback(
     link: str,
     media_type: str,
 ) -> tuple[str | None, str]:
     """
-    Try all downloaders in priority order:
+    Try all downloaders in priority order with adaptive failure cooldowns:
       1. Cookies Base64 (yt-dlp + COOKIES_DATA)
       2. Railway YT API
       3. Shruti API
@@ -503,27 +516,35 @@ async def _download_with_fallback(
     """
     video_id = _extract_video_id(link) or link
 
-    # 1. Cookies Base64 (yt-dlp with decoded COOKIES_DATA)
-    result = await _cookies_download(link, media_type)
-    if result:
-        return result, "cookies_b64"
+    # 1. Cookies Base64
+    if _is_downloader_available("cookies_b64"):
+        result = await _cookies_download(link, media_type)
+        if result:
+            return result, "cookies_b64"
+        _mark_downloader_failed("cookies_b64")
 
     # 2. Railway YT API
-    result = await _railway_download(video_id, media_type)
-    if result:
-        return result, "railway"
+    if _is_downloader_available("railway"):
+        result = await _railway_download(video_id, media_type)
+        if result:
+            return result, "railway"
+        _mark_downloader_failed("railway")
 
     # 3. Shruti API
-    result = await _shruti_download(video_id, media_type)
-    if result:
-        return result, "shruti"
+    if _is_downloader_available("shruti"):
+        result = await _shruti_download(video_id, media_type)
+        if result:
+            return result, "shruti"
+        _mark_downloader_failed("shruti")
 
     # 4. xBit / YTPROXY API
-    result = await _xbit_download(link, media_type)
-    if result:
-        return result, "xbit"
+    if _is_downloader_available("xbit"):
+        result = await _xbit_download(link, media_type)
+        if result:
+            return result, "xbit"
+        _mark_downloader_failed("xbit")
 
-    # 5. yt-dlp without cookies (local download fallback)
+    # 5. yt-dlp without cookies (always active as last resort)
     result = await _ytdlp_nocookie_download(link, media_type)
     if result:
         return result, "ytdlp"
@@ -863,50 +884,55 @@ class YouTube:
         link = _normalize_youtube_link(video_id, self.base)
 
         # ── Method 1: yt-dlp with cookies base64 ─────────────────────────────
-        try:
-            cookie = cookie_txt_file()
-            ydl_opts = {
-                "format": (
-                    "bestvideo[height<=720]+bestaudio/best[height<=720]"
-                    if video else "bestaudio/best"
-                ),
-                "quiet":       True,
-                "no_warnings": True,
-            }
-            ydl_opts = _with_js_runtime(ydl_opts)
-            if cookie:
-                ydl_opts["cookiefile"] = cookie
+        if _is_downloader_available("cookies_b64"):
+            try:
+                cookie = cookie_txt_file()
+                ydl_opts = {
+                    "format": (
+                        "bestvideo[height<=720]+bestaudio/best[height<=720]"
+                        if video else "bestaudio/best"
+                    ),
+                    "quiet":       True,
+                    "no_warnings": True,
+                }
+                ydl_opts = _with_js_runtime(ydl_opts)
+                if cookie:
+                    ydl_opts["cookiefile"] = cookie
 
-            loop = asyncio.get_event_loop()
-            def _run():
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(link, download=False)
-                    # For merged formats, prefer the best audio URL
-                    if info.get("url"):
-                        return info["url"]
-                    formats = info.get("formats") or []
-                    if formats:
-                        return formats[-1].get("url")
-                    return None
+                loop = asyncio.get_event_loop()
+                def _run():
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(link, download=False)
+                        # For merged formats, prefer the best audio URL
+                        if info.get("url"):
+                            return info["url"]
+                        formats = info.get("formats") or []
+                        if formats:
+                            return formats[-1].get("url")
+                        return None
 
-            url = await asyncio.wait_for(
-                loop.run_in_executor(None, _run),
-                timeout=30,
-            )
-            if url:
-                logger.info(
-                    "Stream URL via %s: %s",
-                    "Cookies Base64" if cookie else "yt-dlp",
-                    video_id,
+                url = await asyncio.wait_for(
+                    loop.run_in_executor(None, _run),
+                    timeout=30,
                 )
-                return url
-        except asyncio.TimeoutError:
-            logger.warning("get_stream_url yt-dlp timed out for %s", video_id)
-        except Exception as e:
-            logger.warning("get_stream_url yt-dlp failed for %s: %s", video_id, e)
+                if url:
+                    logger.info(
+                        "Stream URL via %s: %s",
+                        "Cookies Base64" if cookie else "yt-dlp",
+                        video_id,
+                    )
+                    return url
+                else:
+                    _mark_downloader_failed("cookies_b64")
+            except asyncio.TimeoutError:
+                logger.warning("get_stream_url yt-dlp timed out for %s", video_id)
+                _mark_downloader_failed("cookies_b64")
+            except Exception as e:
+                logger.warning("get_stream_url yt-dlp failed for %s: %s", video_id, e)
+                _mark_downloader_failed("cookies_b64")
 
         # ── Method 2: Railway API (validated) ────────────────────────────────
-        if RAILWAY_YT_API_URL and RAILWAY_YT_API_KEY:
+        if RAILWAY_YT_API_URL and RAILWAY_YT_API_KEY and _is_downloader_available("railway"):
             try:
                 headers = {
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -935,8 +961,10 @@ class YouTube:
                                 "Railway stream URL validation failed: status %s",
                                 status,
                             )
+                            _mark_downloader_failed("railway")
             except Exception as e:
                 logger.warning("Railway get_stream_url failed: %s", e)
+                _mark_downloader_failed("railway")
 
         return None
 
