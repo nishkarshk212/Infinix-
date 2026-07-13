@@ -202,6 +202,7 @@ async def _cookies_download(link: str, media_type: str) -> str | None:
                     "no_warnings":         True,
                     "cookiefile":          cookie,
                     "merge_output_format": "mp4",
+                    "extractor_args":      {"youtube": {"player_client": ["ios", "android"]}},
                 }
             else:
                 ydl_opts = {
@@ -210,6 +211,7 @@ async def _cookies_download(link: str, media_type: str) -> str | None:
                     "quiet":        True,
                     "no_warnings":  True,
                     "cookiefile":   cookie,
+                    "extractor_args":      {"youtube": {"player_client": ["ios", "android"]}},
                     "postprocessors": [{
                         "key":              "FFmpegExtractAudio",
                         "preferredcodec":   "mp3",
@@ -455,6 +457,7 @@ async def _ytdlp_nocookie_download(link: str, media_type: str) -> str | None:
                     "quiet":               True,
                     "no_warnings":         True,
                     "merge_output_format": "mp4",
+                    "extractor_args":      {"youtube": {"player_client": ["ios", "android"]}},
                 }
             else:
                 ydl_opts = {
@@ -462,6 +465,7 @@ async def _ytdlp_nocookie_download(link: str, media_type: str) -> str | None:
                     "outtmpl":      outtmpl,
                     "quiet":        True,
                     "no_warnings":  True,
+                    "extractor_args":      {"youtube": {"player_client": ["ios", "android"]}},
                     "postprocessors": [{
                         "key":              "FFmpegExtractAudio",
                         "preferredcodec":   "mp3",
@@ -894,6 +898,7 @@ class YouTube:
                     ),
                     "quiet":       True,
                     "no_warnings": True,
+                    "extractor_args":      {"youtube": {"player_client": ["ios", "android"]}},
                 }
                 ydl_opts = _with_js_runtime(ydl_opts)
                 if cookie:
